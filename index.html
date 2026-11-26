@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Son Durak · 42 SD 317</title>
+  <meta name="description" content="Her gün bir durak, her gün bir seçim. Otobüse bin, hikayenin yönüne sen karar ver.">
+  <meta name="theme-color" content="#0b0d14">
+  <meta property="og:title" content="Son Durak · 42 SD 317">
+  <meta property="og:description" content="Her gün bir durak, her gün bir seçim. Koltuğun seni bekliyor.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0d14'/%3E%3Ctext x='32' y='42' font-family='monospace' font-size='22' font-weight='700' text-anchor='middle' fill='%23f2b134'%3E317%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="fog" aria-hidden="true"></div>
+  <header class="topbar">
+    <a href="#" class="brand" aria-label="Son Durak ana sayfa">
+      <span class="plate">42 SD 317</span>
+      <span class="brand-name">SON DURAK</span>
+    </a>
+    <div class="topbar-right" id="topbar-right"></div>
+  </header>
+
+  <main id="app" aria-live="polite">
+    <div class="loading"><span class="clock">03:17</span></div>
+  </main>
+
+  <footer class="footer">
+    <p>Giriş yaptığında yalnızca seçtiğin takma ad, koltuk numaran ve oyların saklanır. E-posta adresin hiçbir yerde gösterilmez.</p>
+    <p class="muted">Son Durak · özgün bir seçimli hikaye</p>
+  </footer>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
