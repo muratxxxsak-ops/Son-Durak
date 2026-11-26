@@ -1,0 +1,131 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- yardımcılar ----------
+    function signedIn() { return request.auth != null; }
+    function isAdmin() {
+      return signedIn()
+        && request.auth.token.email == "muratxxxsak@gmail.com"
+        && request.auth.token.email_verified == true;
+    }
+    function userPath(uid) { return /databases/$(database)/documents/users/$(uid); }
+    function seatPath(n) { return /databases/$(database)/documents/seats/$(string(n)); }
+    function episodePath(ep) { return /databases/$(database)/documents/episodes/$(ep); }
+
+    function validNick(n) {
+      return n is string && n.size() >= 2 && n.size() <= 18;
+    }
+    // Koltuk numarası geçerli ve bu yazımla birlikte koltuk bu kullanıcıya ait oluyor
+    function seatClaimOk(uid, s) {
+      return s is int && s >= 1 && s <= 42
+        && getAfter(seatPath(s)).data.uid == uid;
+    }
+
+    // ---------- yönetici her şeyi yapabilir ----------
+    match /{document=**} {
+      allow read, write: if isAdmin();
+    }
+
+    // ---------- bölümler: yayın saati gelince herkes okur ----------
+    match /episodes/{ep} {
+      allow get: if resource.data.publishAt <= request.time;
+    }
+
+    // ---------- koltuklar: herkes görür, boş koltuğu sadece sahibi alır ----------
+    match /seats/{seatId} {
+      allow read: if true;
+      allow create: if signedIn()
+        && string(int(seatId)) == seatId
+        && int(seatId) >= 1 && int(seatId) <= 42
+        && request.resource.data.keys().hasOnly(['uid', 'nickname', 'at'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.at == request.time
+        && getAfter(userPath(request.auth.uid)).data.seat == int(seatId)
+        && getAfter(userPath(request.auth.uid)).data.nickname == request.resource.data.nickname
+        && (!exists(userPath(request.auth.uid)) || get(userPath(request.auth.uid)).data.seat == null);
+      // silme / değiştirme yalnızca yönetici (yukarıdaki genel kural)
+    }
+
+    // ---------- yolcu profili ----------
+    match /users/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['nickname', 'seat', 'waiting', 'silent', 'joinedAt'])
+        && validNick(request.resource.data.nickname)
+        && request.resource.data.silent is bool
+        && request.resource.data.joinedAt == request.time
+        && (
+          (request.resource.data.seat == null && request.resource.data.waiting == true)
+          || (request.resource.data.waiting == false && seatClaimOk(uid, request.resource.data.seat))
+        );
+
+      allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['seat', 'waiting', 'silent', 'lastMsgAt'])
+        && request.resource.data.silent is bool
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastMsgAt'])
+          || request.resource.data.lastMsgAt == request.time)
+        && (
+          (request.resource.data.seat == resource.data.seat
+            && request.resource.data.waiting == resource.data.waiting)
+          || (resource.data.seat == null
+            && request.resource.data.waiting == false
+            && seatClaimOk(uid, request.resource.data.seat))
+        );
+    }
+
+    // ---------- otobüs içi sohbet ----------
+    match /chat/{room}/messages/{msgId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && exists(userPath(request.auth.uid))
+        && get(userPath(request.auth.uid)).data.get('banned', false) != true
+        && request.resource.data.keys().hasOnly(['uid', 'nickname', 'seat', 'text', 'at'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.nickname == get(userPath(request.auth.uid)).data.nickname
+        && request.resource.data.seat == get(userPath(request.auth.uid)).data.seat
+        && request.resource.data.text is string
+        && request.resource.data.text.size() >= 1 && request.resource.data.text.size() <= 280
+        && !request.resource.data.text.lower().matches('(?s).*(orospu|siktir|sikeyim|sikerim|yarrak|dalyarak|amına|amcık|amcik|pezeven|kahpe|şerefsiz|serefsiz|yavşak|yavsak|gavat|götveren|kaltak|sürtük).*')
+        && request.resource.data.at == request.time
+        && getAfter(userPath(request.auth.uid)).data.lastMsgAt == request.time
+        && (get(userPath(request.auth.uid)).data.get('lastMsgAt', null) == null
+          || request.time > get(userPath(request.auth.uid)).data.lastMsgAt + duration.value(12, 's'));
+      // silme ve sohbetten atma yalnızca yönetici (genel kural)
+    }
+
+    // ---------- herkese açık otobüs durumu (bagaj sayısı, boşalan koltuklar; isimsiz) ----------
+    match /meta/{docId} {
+      allow read: if true;
+    }
+
+    // ---------- gece kontrolü oyları: gölgelere oy, kilitli yolcu oy veremez ----------
+    match /controlVotes/{ep}/ballots/{uid} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.auth.uid == uid
+        && exists(userPath(uid))
+        && get(userPath(uid)).data.get('lockedUntil', 0) < get(episodePath(ep)).data.number
+        && request.resource.data.keys().hasOnly(['choice', 'at'])
+        && request.resource.data.at == request.time
+        && request.resource.data.choice in get(episodePath(ep)).data.control.labels
+        && request.time >= get(episodePath(ep)).data.publishAt
+        && request.time < get(episodePath(ep)).data.closesAt;
+    }
+
+    // ---------- oylar: kişi başı tek oy, sadece oylama açıkken ----------
+    match /votes/{ep}/ballots/{uid} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.auth.uid == uid
+        && exists(userPath(uid))
+        && get(userPath(uid)).data.get('lockedUntil', 0) < get(episodePath(ep)).data.number
+        && request.resource.data.keys().hasOnly(['choice', 'at'])
+        && request.resource.data.at == request.time
+        && request.resource.data.choice in get(episodePath(ep)).data.choiceKeys
+        && request.time >= get(episodePath(ep)).data.publishAt
+        && request.time < get(episodePath(ep)).data.closesAt;
+      // oy değiştirilemez, silinemez
+    }
+  }
+}

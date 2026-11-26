@@ -30,7 +30,9 @@ const state = {
   silentDraft: false,
   busy: false,
   admin: { tab: "bolumler", episodes: null, editing: null, waiting: null, resultFor: null, resultCounts: null },
-  chat: { room: null, msgs: [], loaded: false, draft: "", unsub: null, lastSent: 0, sending: false }
+  chat: { room: null, msgs: [], loaded: false, draft: "", unsub: null, lastSent: 0, sending: false },
+  bus: { baggage: [], vanished: [] },   // meta/bus: herkese açık, isimsiz
+  myCVotes: {}, cCounts: {}
 };
 
 const $app = document.getElementById("app");
@@ -44,6 +46,16 @@ const tsDate = (t) => (t && typeof t.toDate === "function" ? t.toDate() : t inst
 const now = () => new Date();
 const isOpen = (ep) => { const p = tsDate(ep.publishAt), c = tsDate(ep.closesAt); return p && c && now() >= p && now() < c; };
 const freeSeats = () => TOTAL_SEATS - state.seats.size;
+const SHADOW = { I: "Gölge I", II: "Gölge II", III: "Gölge III" };
+const BAD_TONES = ["kritik", "kotu"];
+function publicEpisodes() { return state.episodes.filter((e) => { const p = tsDate(e.publishAt); return p && p <= now(); }); }
+function currentPublic() { const p = publicEpisodes(); return p[p.length - 1]; }
+function isLocked(ep) { return !!(state.profile && ep && (state.profile.lockedUntil || 0) >= ep.number); }
+function lightsOff() { const c = currentPublic(); return !!(c && c.control && c.control.active && isOpen(c)); }
+function baggageCount() { const c = currentPublic(); const n = c ? c.number : 0; return (state.bus.baggage || []).filter((b) => b.until >= n).length; }
+async function loadMeta() {
+  try { const s = await getDoc(doc(db, "meta", "bus")); state.bus = s.exists() ? { baggage: [], vanished: [], ...s.data() } : { baggage: [], vanished: [] }; } catch (e) { }
+}
 const pad = (n) => String(n).padStart(2, "0");
 const toLocalInput = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 const fmtDate = (d) => d ? d.toLocaleString("tr-TR", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }) : "-";
@@ -104,13 +116,17 @@ async function loadMyVotes() {
     try {
       const s = await getDoc(doc(db, "votes", ep.id, "ballots", uid));
       if (s.exists()) state.myVotes[ep.id] = s.data().choice;
+      if (ep.control && ep.control.active) {
+        const c = await getDoc(doc(db, "controlVotes", ep.id, "ballots", uid));
+        if (c.exists()) state.myCVotes[ep.id] = c.data().choice;
+      }
     } catch (e) { /* yok say */ }
   }));
 }
 
-async function loadCounts(ep) {
-  const keys = ep.choiceKeys || (ep.choices || []).map((c) => c.key);
-  const col = collection(db, "votes", ep.id, "ballots");
+async function loadCounts(ep, kind = "votes") {
+  const keys = kind === "votes" ? (ep.choiceKeys || (ep.choices || []).map((c) => c.key)) : ((ep.control && ep.control.labels) || []);
+  const col = collection(db, kind, ep.id, "ballots");
   const out = { total: 0 };
   await Promise.all(keys.map(async (k) => {
     const snap = await getCountFromServer(query(col, where("choice", "==", k)));
@@ -125,6 +141,9 @@ async function refreshCurrentCounts() {
   if (!ep || !state.user) return;
   if (!state.myVotes[ep.id] && isOpen(ep)) return;
   try { state.counts[ep.id] = await loadCounts(ep); } catch (e) { console.warn(e); }
+  if (ep.control && ep.control.active && (state.myCVotes[ep.id] || !isOpen(ep))) {
+    try { state.cCounts[ep.id] = await loadCounts(ep, "controlVotes"); } catch (e) { }
+  }
 }
 
 /* ------------------------------------------------------------------ actions */
@@ -205,6 +224,7 @@ async function claimSeat() {
 async function vote(epId, key) {
   const ep = state.episodes.find((e) => e.id === epId);
   if (!ep || !isOpen(ep) || state.myVotes[epId]) return;
+  if (isLocked(ep)) return toast("Bagajdasın 🔒 Bu durakta oy veremezsin.");
   const text = (ep.choices.find((c) => c.key === key) || {}).text || key;
   if (!confirm(`${key}: ${text}\n\nOyun kesinleşecek ve değiştirilemez. Emin misin?`)) return;
   state.busy = true; render();
@@ -230,11 +250,60 @@ async function toggleSilent() {
   render();
 }
 
+async function controlVote(epId, label) {
+  const ep = state.episodes.find((e) => e.id === epId);
+  if (!ep || !isOpen(ep) || state.myCVotes[epId]) return;
+  if (isLocked(ep)) return toast("Bagajdasın 🔒 Bu durakta oy veremezsin.");
+  if (!confirm(`${SHADOW[label]} otobüsten insin mi?\n\nBu oy da kesinleşir ve değiştirilemez.`)) return;
+  state.busy = true; render();
+  try {
+    await setDoc(doc(db, "controlVotes", epId, "ballots", state.user.uid), { choice: label, at: serverTimestamp() });
+    state.myCVotes[epId] = label;
+    try { state.cCounts[epId] = await loadCounts(ep, "controlVotes"); } catch (e) { }
+    toast("Oyun kaydedildi. Gölgelerden birinin kaderi yarın belli olacak.");
+  } catch (e) { toast("Oy kaydedilemedi."); }
+  state.busy = false; render();
+}
+
+function viewControl(ep) {
+  if (!ep.control || !ep.control.active) return "";
+  const my = state.myCVotes[ep.id];
+  const counts = (ep.result && ep.result.control && ep.result.control.counts) || state.cCounts[ep.id];
+  const showPct = !!counts && counts.total > 0 && (!!my || !isOpen(ep));
+  const chosen = ep.result && ep.result.control ? ep.result.control.chosen : null;
+  const btns = ep.control.labels.map((l) => {
+    const p = pct(counts, l);
+    const dis = !!my || !isOpen(ep) || state.busy || isLocked(ep);
+    return `<button class="choice ${my === l ? "voted" : ""} ${chosen === l ? "winner" : ""} ${showPct ? "has-pct" : ""}" data-cvote="${l}" data-ep="${esc(ep.id)}" ${dis ? "disabled" : ""}>
+      ${showPct ? `<span class="bar" style="width:${p}%;background:rgba(224,72,62,.14)"></span>` : ""}
+      <span class="key" style="background:#0b0c12;color:#9aa0b8">👤</span><span><b>${SHADOW[l]}</b> <span class="muted">· kim olduğu bilinmiyor</span></span>
+      ${showPct ? `<span class="pct">%${p}</span>` : ""}</button>`;
+  }).join("");
+  return `
+    <div class="card" style="background:#07080d;border-color:#3a1f22;margin-top:18px">
+      <div class="eyebrow" style="color:#e0483e">🌑 Gece kontrolü</div>
+      <p style="font-family:var(--serif);font-size:18px;line-height:1.7;color:#d9d2c4">Otobüsün ışıkları söndü. Rıza dikiz aynasından karanlığa bakıyor: <i>"Aranızda bu yolculuğu karanlığa sürükleyen biri var."</i> Üç gölge kıpırdamadan oturuyor. Hangisi otobüsten insin?</p>
+      <p class="note">Gölgeler son karanlık yolu seçenler arasından rastgele seçildi. İsimleri kimse bilmiyor. Seçilen gölge 2 durak boyunca bagaja kilitlenir ve oy veremez.</p>
+      <div class="choices">${btns}</div>
+      ${my ? `<p class="note center">Oyunu <b>${SHADOW[my]}</b> için verdin.</p>` : ""}
+    </div>`;
+}
+
+function personalBanners(ep) {
+  const p = state.profile || {};
+  let out = "";
+  if (isLocked(ep)) out += `<div class="result-banner" style="background:#0b0c12;border-color:#3a1f22;color:#e8c9c5">🔒 <b>Bagaja kilitlendin.</b> Gece kontrolünde seni seçtiler. ${p.lockedUntil + 1}. durakta koltuğuna dönebileceksin. O zamana kadar okuyabilir ve sohbet edebilirsin ama oy veremezsin. Bunu sadece sen biliyorsun.</div>`;
+  if (p.suspect && p.suspect.ep === ep.id && ep.control && ep.control.active && !ep.result) out += `<div class="result-banner" style="background:#0b0c12;border-color:#3a1f22;color:#e8c9c5">👤 <b>${SHADOW[p.suspect.label]} sensin.</b> Bunu sadece sen biliyorsun. Kendini ele vermek ya da saklanmak senin elinde.</div>`;
+  return out;
+}
+
 /* ------------------------------------------------------------------ views */
 function busMap({ selectable = false } = {}) {
   const myUid = state.user && state.user.uid;
+  const dark = lightsOff() && !selectable;
   const seatBtn = (n) => {
     const s = state.seats.get(n);
+    if (dark) return `<button class="seat" disabled style="background:#0b0c12;border-color:#1c2030;color:#3a4058" aria-label="Karanlık koltuk">?</button>`;
     const mine = s && s.uid === myUid;
     const cls = ["seat", s ? "taken" : "", mine ? "mine" : "", state.picked === n ? "picked" : ""].join(" ");
     const dis = !selectable || !!s;
@@ -248,7 +317,8 @@ function busMap({ selectable = false } = {}) {
   }
   rows += `<div class="row back">${[37, 38, 39, 40, 41, 42].map(seatBtn).join("")}</div>`;
   return `
-    <div class="bus" role="group" aria-label="Otobüs koltuk planı">
+    ${dark ? `<p class="center" style="color:#e0483e;font-family:var(--mono);letter-spacing:2px">🌑 IŞIKLAR SÖNDÜ</p>` : ""}
+    <div class="bus" role="group" aria-label="Otobüs koltuk planı" ${dark ? 'style="background:#05060a;border-color:#1c2030"' : ""}>
       <div class="bus-front"><span class="wheel" aria-hidden="true"></span><span>ŞOFÖR · RIZA</span><span>KAPI ▸</span></div>
       <div class="rows">${rows}</div>
     </div>
@@ -324,7 +394,7 @@ function choiceButtons(ep, { interactive }) {
   return `<div class="choices">${ep.choices.map((c) => {
     const p = pct(counts, c.key);
     const cls = ["choice", my === c.key ? "voted" : "", winner === c.key ? "winner" : "", showPct ? "has-pct" : ""].join(" ");
-    const dis = !interactive || !!my || !isOpen(ep) || state.busy;
+    const dis = !interactive || !!my || !isOpen(ep) || state.busy || isLocked(ep);
     return `<button class="${cls}" data-vote="${esc(c.key)}" data-ep="${esc(ep.id)}" ${dis ? "disabled" : ""}>
       ${showPct ? `<span class="bar" style="width:${p}%"></span>` : ""}
       <span class="key">${esc(c.key)}</span><span>${esc(c.text)}</span>
@@ -370,19 +440,25 @@ function viewEpisode(ep) {
       <span class="stop" ${preview ? 'style="margin-top:14px"' : ""}>${esc(ep.stop || ep.number + ". DURAK")}</span>
       <h2>${esc(ep.title)}</h2>
       ${ep.number === 1 && ep.intro ? `<blockquote class="intro">${esc(ep.intro)}</blockquote>` : ""}
+      ${preview ? "" : personalBanners(ep)}
       ${resultLineForPrev(ep)}
       <div class="story">${paras(ep.body)}</div>
       <h3 class="section-title">Rıza ne yapsın?</h3>
       ${choiceButtons(ep, { interactive: true })}
       ${preview ? "" : status}
       ${resultLine(ep)}
+      ${viewControl(ep)}
     </article>`;
 }
 
 function resultLineForPrev(ep) {
   const prev = state.episodes.find((e) => e.number === ep.number - 1);
   if (!prev || !prev.result || !prev.result.winner) return "";
-  return `<div style="margin:12px 0 4px">${toneBanner(prev.result, "Önceki durakta")}</div>`;
+  let extra = "";
+  const r = prev.result;
+  if (r.vanished && r.vanished.length) extra += `<div class="result-banner" style="background:#0b0c12;border-color:#2b2f45;color:#cfd3e6">🪑 Sabah ${r.vanished.map((n) => `<b>${n}</b>`).join(" ve ")} numaralı ${r.vanished.length > 1 ? "koltuklar" : "koltuk"} boştu. Oturanı bir daha görülmedi.</div>`;
+  if (r.control && r.control.chosen) extra += `<div class="result-banner" style="background:#0b0c12;border-color:#3a1f22;color:#e8c9c5">🌑 Gece kontrolü bitti. Yolcuların <b>%${pct(r.control.counts, r.control.chosen)}</b>'i <b>${SHADOW[r.control.chosen]}</b> dedi. ${SHADOW[r.control.chosen]} bagaja kilitlendi. Kim olduğunu sadece kendisi biliyor.</div>`;
+  return `<div style="margin:12px 0 4px;display:grid;gap:8px">${toneBanner(r, "Önceki durakta")}${extra}</div>`;
 }
 
 function viewMain() {
@@ -394,8 +470,8 @@ function viewMain() {
   if (p.seat == null) {
     waiting = `
       <div class="card">
-        <div class="eyebrow">Durakta bekliyorsun</div>
-        <p>Otobüs dolu olduğu için henüz koltuğun yok. Yine de bölümleri okuyup oy verebilirsin.</p>
+        <div class="eyebrow">${p.vanishedEp ? "Ortadan kayboldun" : "Durakta bekliyorsun"}</div>
+        <p>${p.vanishedEp ? `${p.vanishedEp}. duraktan sonraki gece otobüsten silinip gittin. Kimse ne olduğunu bilmiyor. Şimdi karanlık bir durakta bekliyorsun. Boş bir koltuk bulursan yeniden binebilirsin. Bu arada okuyup oy verebilirsin.` : "Otobüs dolu olduğu için henüz koltuğun yok. Yine de bölümleri okuyup oy verebilirsin."}</p>
         ${freeSeats() > 0 ? `<p><b>Boş koltuk var!</b> Hemen kap:</p>${busMap({ selectable: true })}
           <button class="btn block" data-action="claim" ${!state.picked || state.busy ? "disabled" : ""}>${state.picked ? state.picked + " numaralı koltuğa geç" : "Koltuk seç"}</button>` : ""}
       </div>`;
@@ -417,6 +493,9 @@ function viewMain() {
     <h3 class="section-title">Otobüs</h3>
     ${seatCounter()}
     ${busMap()}
+    ${baggageCount() ? `<div class="card" style="background:#07080d;border-color:#2b2f45;text-align:center"><div class="eyebrow">🧳 Bagaj</div>
+      <div style="display:flex;gap:8px;justify-content:center;margin:10px 0">${Array.from({ length: baggageCount() }, () => `<span class="seat" style="width:44px;background:#0b0c12;border-color:#3a1f22;color:#e0483e">🔒</span>`).join("")}</div>
+      <p class="note" style="margin:0">${baggageCount()} yolcu bagaja kilitli. Kim oldukları bilinmiyor.</p></div>` : ""}
     <div class="card">
       <label class="check"><input type="checkbox" data-action="silent" ${p.silent ? "checked" : ""}>
         <span>Sessiz yolcuyum <span class="muted">(hikayede rol almam)</span></span></label>
@@ -550,6 +629,13 @@ function viewRules() {
       ${rule(`${TOTAL_STOPS} durak, tek final`, "Hikaye 1. Durak'ta başlar, Son Durak'a varınca biter.")}
       ${rule("Hiçbir seçim son değildir", "Kötü bir karar hikayeyi karanlığa sürükleyebilir ama sonraki duraklarda düzeltme şansı hep var. Son anda verilen tek bir karar bile her şeyi değiştirebilir. Gidişatın iyi mi kötü mü olduğu ise kimseye söylenmez.")}
     </div>
+    <h3 class="section-title">Karanlık tarafı</h3>
+    <div class="admin-list">
+      ${rule("🟢 🟠 🔴 Gidişat", "Her seçim otobüsü doğru, kritik ya da karanlık bir yola sokar. Hangisinin hangisi olduğunu oylama sırasında kimse bilmez. Sonuç ertesi sabah açıklanır.")}
+      ${rule("🪑 Kaybolan yolcular", "Karanlık yol seçilirse, o yolu seçenlerden biri gece ortadan kaybolabilir. Koltuğu boşalır ve durakta beklemeye başlar. Boş bir koltuk bulunca yeniden binebilir.")}
+      ${rule("🌑 Gece kontrolü", "Otobüs üst üste iki kez kötü yola girerse ışıklar söner. Son karanlık yolu seçenlerden rastgele 3 gölge seçilir. İsimleri kimse bilmez, yolcular sadece Gölge I, II ve III'e oy verir.")}
+      ${rule("🧳 Bagaj", "Gece kontrolünde seçilen gölge 2 durak boyunca bagaja kilitlenir. Okuyabilir ve sohbet edebilir ama oy veremez. Kim olduğunu sadece kendisi bilir. İsterse itiraf eder.")}
+    </div>
     <h3 class="section-title">Otobüs içi sohbet</h3>
     <div class="admin-list">
       ${rule("Konuşun, ikna edin", "Her durağın kendi sohbeti var. Otobüs kalkmadan önce herkes Peron'da buluşur. Hangi seçeneğin neden doğru olduğunu tartışabilir, birbirinizin fikrini değiştirebilirsiniz.")}
@@ -613,6 +699,8 @@ function editorForm(ed) {
       <label for="ed-A">A seçeneği</label><input id="ed-A" value="${esc(ch("A"))}"><select id="ed-tA" style="margin-top:6px">${toneOpts(ed.tones && ed.tones.A)}</select>
       <label for="ed-B">B seçeneği</label><input id="ed-B" value="${esc(ch("B"))}"><select id="ed-tB" style="margin-top:6px">${toneOpts(ed.tones && ed.tones.B)}</select>
       <label for="ed-C">C seçeneği (isteğe bağlı)</label><input id="ed-C" value="${esc(ch("C"))}"><select id="ed-tC" style="margin-top:6px">${toneOpts(ed.tones && ed.tones.C)}</select>
+      <label class="check" style="margin-top:16px"><input type="checkbox" id="ed-control" ${ed.control ? "checked" : ""} ${ed.controlLocked ? "disabled" : ""}>
+        <span>🌑 Bu durakta <b>Gece kontrolü</b> olsun <span class="muted">${ed.controlLocked ? "(kuruldu, değiştirilemez)" : ed.controlSuggested ? "(önceki iki durak kötü yola girdi, öneriliyor)" : "(önceki durakta kötü yolu seçenlerden 3 gölge seçilir)"}</span></span></label>
       <div class="grid2">
         <div><label for="ed-pub">Yayın zamanı</label><input id="ed-pub" type="datetime-local" value="${toLocalInput(ed.pub)}"></div>
         <div><label for="ed-close">Oylama bitişi</label><input id="ed-close" type="datetime-local" value="${toLocalInput(ed.close)}"></div>
@@ -649,6 +737,8 @@ function viewAdmin() {
             <div class="choices">${ep.choices.map((ch) => `<div class="choice has-pct ${auto === ch.key ? "winner" : ""}"><span class="bar" style="width:${pct(c, ch.key)}%"></span><span class="key">${esc(ch.key)}</span><span>${esc(ch.text)} <span class="muted">(${c[ch.key] || 0} oy)</span>${TONES[(a.resultTones || {})[ch.key]] ? `<br><small>${TONES[a.resultTones[ch.key]].icon} ${TONES[a.resultTones[ch.key]].label}</small>` : ""}</span><span class="pct">%${pct(c, ch.key)}</span></div>`).join("")}</div>
             ${auto ? `<p class="note">Kazanan: <b>${esc(auto)}</b></p>` : `<p class="note">${c.total ? "Beraberlik var. Kazananı sen seç:" : "Henüz oy yok. İstersen kazananı elle seçebilirsin:"}</p>`}
             <div class="btn-row">${keys.map((k) => `<button class="btn ${k === auto ? "" : "ghost"} small" data-action="save-result" data-key="${k}">${k} kazandı olarak kaydet</button>`).join("")}</div>
+            ${ep.control && ep.control.active ? `<p class="note">🌑 Bu durakta gece kontrolü var. Sonucu kaydettiğinde en çok oyu alan gölge otomatik olarak 2 durak bagaja kilitlenir. Kim olduğu sana da gösterilmez.</p>` : ""}
+            ${(state.admin.resultTones || {})[auto] === "kotu" ? `<p class="note">🔴 Kazanan karanlık yol. Kaydederken bu yolu seçenlerden birinin kaybolmasını isteyip istemediğin sorulacak.</p>` : ""}
             ${isOpen(ep) ? `<div class="btn-row"><button class="btn danger small" data-action="close-now">Oylamayı şimdi kapat</button></div>` : ""}
           `}
           <div class="btn-row"><button class="btn ghost small" data-action="result-back">← Geri</button></div>
@@ -700,6 +790,37 @@ function readEditor() {
   };
 }
 
+/* gece kontrolü / kaybolma yardımcıları (yalnızca yönetici) */
+function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+async function badVoters(ep, winner) {
+  const snap = await getDocs(query(collection(db, "votes", ep.id, "ballots"), where("choice", "==", winner)));
+  const out = [];
+  for (const d of snap.docs) {
+    try { const u = await getDoc(doc(db, "users", d.id)); if (u.exists()) out.push({ uid: d.id, ...u.data() }); } catch (e) { }
+  }
+  return out;
+}
+function needsControl(nextNumber) {
+  const eps = state.admin.episodes || [];
+  const a = eps.find((e) => e.number === nextNumber - 1), b = eps.find((e) => e.number === nextNumber - 2);
+  if (!a || !b || !a.result || !b.result) return false;
+  if (a.control && a.control.active) return false; // üst üste kontrol olmasın
+  return BAD_TONES.includes(a.result.tone) && BAD_TONES.includes(b.result.tone);
+}
+async function setupControl(newEp) {
+  const prev = (state.admin.episodes || []).find((e) => e.number === newEp.number - 1);
+  if (!prev || !prev.result || !prev.result.winner) return null;
+  const pool = shuffle((await badVoters(prev, prev.result.winner)).filter((u) => !u.silent && !((u.lockedUntil || 0) >= newEp.number)));
+  if (pool.length < 2) return null;
+  const labels = ["I", "II", "III"].slice(0, Math.min(3, pool.length));
+  const suspects = {};
+  const b = writeBatch(db);
+  labels.forEach((l, i) => { suspects[l] = pool[i].uid; b.update(doc(db, "users", pool[i].uid), { suspect: { ep: newEp.id, label: l } }); });
+  b.set(doc(db, "controlSecrets", newEp.id), { suspects });
+  await b.commit();
+  return { active: true, labels };
+}
+
 async function adminSave() {
   const e = readEditor();
   if (!e.number || e.number < 1) return toast("Bölüm numarası gir.");
@@ -717,6 +838,11 @@ async function adminSave() {
       publishAt: Timestamp.fromDate(e.pub), closesAt: Timestamp.fromDate(e.close), updatedAt: serverTimestamp()
     }, { merge: true });
     await setDoc(doc(db, "episodeSecrets", id), { tones: state.admin.editing.tones || {} });
+    if (state.admin.editing.control && !state.admin.editing.controlLocked) {
+      const ctl = await setupControl({ id, number: e.number });
+      if (ctl) { await updateDoc(doc(db, "episodes", id), { control: ctl }); toast(`🌑 Gece kontrolü kuruldu: ${ctl.labels.length} gölge seçildi.`); }
+      else toast("Gece kontrolü kurulamadı: önceki durakta kötü yolu seçen en az 2 (sessiz olmayan) yolcu yok.");
+    }
     if (prevId && prevId !== id) await deleteDoc(doc(db, "episodes", prevId));
     state.admin.editing = null;
     await adminLoad(); await loadEpisodes(); await loadMyVotes();
@@ -759,10 +885,11 @@ function render() {
 
 /* ------------------------------------------------------------------ events */
 document.addEventListener("click", async (ev) => {
-  const t = ev.target.closest("[data-action],[data-seat],[data-vote],[data-tab]");
+  const t = ev.target.closest("[data-action],[data-seat],[data-vote],[data-cvote],[data-tab]");
   if (!t || t.disabled) return;
   if (t.dataset.tab) { state.admin.tab = t.dataset.tab; state.admin.editing = null; state.admin.resultFor = null; return render(); }
   if (t.dataset.vote) return vote(t.dataset.ep, t.dataset.vote);
+  if (t.dataset.cvote) return controlVote(t.dataset.ep, t.dataset.cvote);
   const action = t.dataset.action;
   if (!action && t.dataset.seat) { state.picked = Number(t.dataset.seat); return render(); }
   switch (action) {
@@ -786,12 +913,13 @@ document.addEventListener("click", async (ev) => {
       const last = state.admin.episodes[state.admin.episodes.length - 1];
       const num = last ? last.number + 1 : 1;
       const pub = num === 1 ? new Date(Math.ceil(Date.now() / 300000) * 300000) : nextEightAm();
-      state.admin.editing = { isNew: true, number: num, stop: `${num}. DURAK`, title: "", intro: "", body: "", choices: [], pub, close: defaultClose(pub) };
+      const sug = needsControl(num);
+      state.admin.editing = { isNew: true, number: num, stop: `${num}. DURAK`, title: "", intro: "", body: "", choices: [], pub, close: defaultClose(pub), control: sug, controlSuggested: sug };
       return render();
     }
     case "ed-edit": {
       const ep = state.admin.episodes.find((e) => e.id === t.dataset.id);
-      state.admin.editing = { ...ep, isNew: false, pub: tsDate(ep.publishAt), close: tsDate(ep.closesAt), tones: {} };
+      state.admin.editing = { ...ep, isNew: false, pub: tsDate(ep.publishAt), close: tsDate(ep.closesAt), tones: {}, control: !!(ep.control && ep.control.active), controlLocked: !!(ep.control && ep.control.active) };
       try { const sec = await getDoc(doc(db, "episodeSecrets", ep.id)); if (sec.exists()) state.admin.editing.tones = sec.data().tones || {}; } catch (e) { }
       return render();
     }
@@ -811,8 +939,36 @@ document.addEventListener("click", async (ev) => {
       const c = state.admin.resultCounts || { total: 0 };
       try {
         const tone = (state.admin.resultTones || {})[t.dataset.key] || null;
-        await updateDoc(doc(db, "episodes", ep.id), { result: { winner: t.dataset.key, counts: c, tone, savedAt: serverTimestamp() } });
-        toast(`${ep.stop}: ${t.dataset.key} kazanan olarak kaydedildi.`);
+        const result = { winner: t.dataset.key, counts: c, tone, savedAt: serverTimestamp() };
+        const meta = { baggage: [...(state.bus.baggage || [])], vanished: [...(state.bus.vanished || [])] };
+        // 1) gece kontrolü sonucu: seçilen gölge bagaja
+        if (ep.control && ep.control.active) {
+          const cc = await loadCounts(ep, "controlVotes");
+          const max = Math.max(0, ...ep.control.labels.map((l) => cc[l] || 0));
+          const top = ep.control.labels.filter((l) => (cc[l] || 0) === max);
+          const chosen = shuffle([...top])[0];
+          const sec = await getDoc(doc(db, "controlSecrets", ep.id));
+          const uid = sec.exists() ? sec.data().suspects[chosen] : null;
+          if (uid) { await updateDoc(doc(db, "users", uid), { lockedUntil: ep.number + 2 }); meta.baggage.push({ until: ep.number + 2, ep: ep.id }); }
+          result.control = { chosen, counts: cc };
+        }
+        // 2) karanlık yol: kötü yolu seçenlerden biri ortadan kaybolur
+        if (tone === "kotu" && confirm("🔴 Karanlık yol seçildi. Bu yolu seçenlerden biri ortadan kaybolsun mu? (Koltuğu boşalır, durakta beklemeye başlar.)")) {
+          const pool = shuffle((await badVoters(ep, t.dataset.key)).filter((u) => !u.silent && u.seat));
+          const n = pool.length >= 15 ? 2 : pool.length ? 1 : 0;
+          const gone = pool.slice(0, n);
+          if (gone.length) {
+            const b = writeBatch(db);
+            gone.forEach((u) => { b.delete(doc(db, "seats", String(u.seat))); b.update(doc(db, "users", u.uid), { seat: null, waiting: true, vanishedEp: ep.number }); });
+            await b.commit();
+            result.vanished = gone.map((u) => u.seat);
+            meta.vanished.push(...gone.map((u) => ({ seat: u.seat, ep: ep.id })));
+          }
+        }
+        await updateDoc(doc(db, "episodes", ep.id), { result });
+        await setDoc(doc(db, "meta", "bus"), meta);
+        state.bus = meta;
+        toast(`${ep.stop}: ${t.dataset.key} kazanan olarak kaydedildi.${result.control ? " 🌑 " + SHADOW[result.control.chosen] + " bagaja kilitlendi." : ""}${result.vanished ? " 🪑 " + result.vanished.join(", ") + " numaralı koltuk boşaldı." : ""}`, 6000);
         state.admin.resultFor = null; await adminLoad(); await loadEpisodes();
       } catch (e) { toast("Kaydedilemedi."); }
       return render();
@@ -858,6 +1014,7 @@ document.addEventListener("input", (ev) => {
 });
 document.addEventListener("change", (ev) => {
   if (ev.target.id === "silent") state.silentDraft = ev.target.checked;
+  if (ev.target.id === "ed-control" && state.admin.editing) state.admin.editing.control = ev.target.checked;
   if (["ed-tA", "ed-tB", "ed-tC"].includes(ev.target.id) && state.admin.editing) {
     state.admin.editing.tones = { ...(state.admin.editing.tones || {}), [ev.target.id.slice(4)]: ev.target.value };
   }
@@ -893,9 +1050,9 @@ onSnapshot(collection(db, "seats"), (snap) => {
 
 getRedirectResult(auth).catch(() => {});
 
-const episodesReady = loadEpisodes();
+const episodesReady = Promise.all([loadEpisodes(), loadMeta()]);
 onAuthStateChanged(auth, async (u) => {
-  state.user = u; state.profile = null; state.profileLoaded = false; state.myVotes = {}; state.counts = {};
+  state.user = u; state.profile = null; state.profileLoaded = false; state.myVotes = {}; state.counts = {}; state.myCVotes = {}; state.cCounts = {};
   state.admin = { tab: "bolumler", episodes: null, editing: null, waiting: null, resultFor: null, resultCounts: null };
   if (state.chat.unsub) state.chat.unsub();
   state.chat = { room: null, msgs: [], loaded: false, draft: "", unsub: null, lastSent: 0, sending: false };
