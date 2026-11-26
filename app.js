@@ -333,12 +333,24 @@ function choiceButtons(ep, { interactive }) {
   }).join("")}</div>`;
 }
 
+const TONES = {
+  iyi: { icon: "🟢", label: "Doğru yol", text: "Otobüs yoluna devam ediyor… şimdilik.", bg: "rgba(76,195,138,.10)", bd: "rgba(76,195,138,.45)", fg: "#bdf0d6" },
+  kritik: { icon: "🟠", label: "Kritik yol", text: "Bir şeyler ters gitmeye başladı.", bg: "rgba(242,177,52,.10)", bd: "rgba(242,177,52,.5)", fg: "#f6dfa8" },
+  kotu: { icon: "🔴", label: "Karanlık yol", text: "Otobüs daha da derine giriyor.", bg: "rgba(224,72,62,.12)", bd: "rgba(224,72,62,.5)", fg: "#ffc4be" }
+};
+function toneBanner(result, lead) {
+  const t = TONES[result.tone];
+  const c = result.counts || {};
+  const line = `${lead} <b>%${pct(c, result.winner)}</b> ile <b>${esc(result.winner)}</b> seçildi.`;
+  if (!t) return `<div class="result-banner">${line}</div>`;
+  return `<div class="result-banner" style="background:${t.bg};border-color:${t.bd};color:${t.fg}"><b style="font-size:17px">${t.icon} ${t.label}.</b> ${line} ${t.text}</div>`;
+}
+
 function resultLine(ep) {
   if (!ep.result || !ep.result.winner) return "";
   const c = ep.result.counts || {};
   const p = pct(c, ep.result.winner);
-  const choice = ep.choices.find((x) => x.key === ep.result.winner);
-  return `<div class="result-banner">Yolcular karar verdi: <b>%${p}</b> ile <b>${esc(ep.result.winner)}</b> seçildi. ${choice ? `<span class="muted">(${esc(choice.text)})</span>` : ""}</div>`;
+  return toneBanner(ep.result, "Yolcular karar verdi:");
 }
 
 function viewEpisode(ep) {
@@ -370,8 +382,7 @@ function viewEpisode(ep) {
 function resultLineForPrev(ep) {
   const prev = state.episodes.find((e) => e.number === ep.number - 1);
   if (!prev || !prev.result || !prev.result.winner) return "";
-  const c = prev.result.counts || {};
-  return `<p class="note">Dünkü durakta yolcuların <b>%${pct(c, prev.result.winner)}</b>'i <b>${esc(prev.result.winner)}</b> dedi.</p>`;
+  return `<div style="margin:12px 0 4px">${toneBanner(prev.result, "Önceki durakta")}</div>`;
 }
 
 function viewMain() {
@@ -580,6 +591,10 @@ function adminStatus(ep) {
   return `<span class="pill wait">Kapandı · sonuç bekliyor</span>`;
 }
 
+function toneOpts(v) {
+  return [["", "Gidişat: seçilmedi"], ["iyi", "🟢 Seçilirse: Doğru yol"], ["kritik", "🟠 Seçilirse: Kritik yol"], ["kotu", "🔴 Seçilirse: Karanlık yol"]]
+    .map(([k, l]) => `<option value="${k}" ${v === k ? "selected" : ""}>${l}</option>`).join("");
+}
 function editorForm(ed) {
   const ch = (k) => ((ed.choices || []).find((c) => c.key === k) || {}).text || "";
   return `
@@ -594,9 +609,10 @@ function editorForm(ed) {
       <label for="ed-title">Başlık</label><input id="ed-title" value="${esc(ed.title)}">
       <label for="ed-intro">Giriş yazısı (sadece 1. bölümde gösterilir)</label><textarea id="ed-intro" style="min-height:80px">${esc(ed.intro)}</textarea>
       <label for="ed-body">Hikaye (paragrafları boş satırla ayır)</label><textarea id="ed-body" style="min-height:220px">${esc(ed.body)}</textarea>
-      <label for="ed-A">A seçeneği</label><input id="ed-A" value="${esc(ch("A"))}">
-      <label for="ed-B">B seçeneği</label><input id="ed-B" value="${esc(ch("B"))}">
-      <label for="ed-C">C seçeneği (isteğe bağlı)</label><input id="ed-C" value="${esc(ch("C"))}">
+      <p class="note">Her seçeneğin altında, seçilirse hikayenin nereye gideceğini işaretle. Yolcular bunu oylama bitip sonuç açıklanınca görür. O zamana kadar sadece sen görürsün.</p>
+      <label for="ed-A">A seçeneği</label><input id="ed-A" value="${esc(ch("A"))}"><select id="ed-tA" style="margin-top:6px">${toneOpts(ed.tones && ed.tones.A)}</select>
+      <label for="ed-B">B seçeneği</label><input id="ed-B" value="${esc(ch("B"))}"><select id="ed-tB" style="margin-top:6px">${toneOpts(ed.tones && ed.tones.B)}</select>
+      <label for="ed-C">C seçeneği (isteğe bağlı)</label><input id="ed-C" value="${esc(ch("C"))}"><select id="ed-tC" style="margin-top:6px">${toneOpts(ed.tones && ed.tones.C)}</select>
       <div class="grid2">
         <div><label for="ed-pub">Yayın zamanı</label><input id="ed-pub" type="datetime-local" value="${toLocalInput(ed.pub)}"></div>
         <div><label for="ed-close">Oylama bitişi</label><input id="ed-close" type="datetime-local" value="${toLocalInput(ed.close)}"></div>
@@ -630,7 +646,7 @@ function viewAdmin() {
           <h3>${esc(ep.stop)} · oy sonuçları</h3>
           ${!c ? `<p class="muted">Sayılıyor…</p>` : `
             <p class="muted">Toplam oy: <b class="counter">${c.total}</b> ${isOpen(ep) ? "· oylama hâlâ açık" : ""}</p>
-            <div class="choices">${ep.choices.map((ch) => `<div class="choice has-pct ${auto === ch.key ? "winner" : ""}"><span class="bar" style="width:${pct(c, ch.key)}%"></span><span class="key">${esc(ch.key)}</span><span>${esc(ch.text)} <span class="muted">(${c[ch.key] || 0} oy)</span></span><span class="pct">%${pct(c, ch.key)}</span></div>`).join("")}</div>
+            <div class="choices">${ep.choices.map((ch) => `<div class="choice has-pct ${auto === ch.key ? "winner" : ""}"><span class="bar" style="width:${pct(c, ch.key)}%"></span><span class="key">${esc(ch.key)}</span><span>${esc(ch.text)} <span class="muted">(${c[ch.key] || 0} oy)</span>${TONES[(a.resultTones || {})[ch.key]] ? `<br><small>${TONES[a.resultTones[ch.key]].icon} ${TONES[a.resultTones[ch.key]].label}</small>` : ""}</span><span class="pct">%${pct(c, ch.key)}</span></div>`).join("")}</div>
             ${auto ? `<p class="note">Kazanan: <b>${esc(auto)}</b></p>` : `<p class="note">${c.total ? "Beraberlik var. Kazananı sen seç:" : "Henüz oy yok. İstersen kazananı elle seçebilirsin:"}</p>`}
             <div class="btn-row">${keys.map((k) => `<button class="btn ${k === auto ? "" : "ghost"} small" data-action="save-result" data-key="${k}">${k} kazandı olarak kaydet</button>`).join("")}</div>
             ${isOpen(ep) ? `<div class="btn-row"><button class="btn danger small" data-action="close-now">Oylamayı şimdi kapat</button></div>` : ""}
@@ -700,6 +716,7 @@ async function adminSave() {
       choices: e.choices, choiceKeys: e.choices.map((c) => c.key),
       publishAt: Timestamp.fromDate(e.pub), closesAt: Timestamp.fromDate(e.close), updatedAt: serverTimestamp()
     }, { merge: true });
+    await setDoc(doc(db, "episodeSecrets", id), { tones: state.admin.editing.tones || {} });
     if (prevId && prevId !== id) await deleteDoc(doc(db, "episodes", prevId));
     state.admin.editing = null;
     await adminLoad(); await loadEpisodes(); await loadMyVotes();
@@ -709,7 +726,8 @@ async function adminSave() {
 }
 
 async function adminShowResult(id) {
-  state.admin.resultFor = id; state.admin.resultCounts = null; render();
+  state.admin.resultFor = id; state.admin.resultCounts = null; state.admin.resultTones = {}; render();
+  try { const sec = await getDoc(doc(db, "episodeSecrets", id)); if (sec.exists()) state.admin.resultTones = sec.data().tones || {}; } catch (e) { }
   const ep = state.admin.episodes.find((e) => e.id === id);
   try { state.admin.resultCounts = await loadCounts(ep); } catch (e) { toast("Oylar sayılamadı."); state.admin.resultCounts = { total: 0 }; }
   render();
@@ -773,7 +791,8 @@ document.addEventListener("click", async (ev) => {
     }
     case "ed-edit": {
       const ep = state.admin.episodes.find((e) => e.id === t.dataset.id);
-      state.admin.editing = { ...ep, isNew: false, pub: tsDate(ep.publishAt), close: tsDate(ep.closesAt) };
+      state.admin.editing = { ...ep, isNew: false, pub: tsDate(ep.publishAt), close: tsDate(ep.closesAt), tones: {} };
+      try { const sec = await getDoc(doc(db, "episodeSecrets", ep.id)); if (sec.exists()) state.admin.editing.tones = sec.data().tones || {}; } catch (e) { }
       return render();
     }
     case "ed-cancel": state.admin.editing = null; return render();
@@ -791,7 +810,8 @@ document.addEventListener("click", async (ev) => {
       const ep = state.admin.episodes.find((e) => e.id === state.admin.resultFor);
       const c = state.admin.resultCounts || { total: 0 };
       try {
-        await updateDoc(doc(db, "episodes", ep.id), { result: { winner: t.dataset.key, counts: c, savedAt: serverTimestamp() } });
+        const tone = (state.admin.resultTones || {})[t.dataset.key] || null;
+        await updateDoc(doc(db, "episodes", ep.id), { result: { winner: t.dataset.key, counts: c, tone, savedAt: serverTimestamp() } });
         toast(`${ep.stop}: ${t.dataset.key} kazanan olarak kaydedildi.`);
         state.admin.resultFor = null; await adminLoad(); await loadEpisodes();
       } catch (e) { toast("Kaydedilemedi."); }
@@ -825,6 +845,7 @@ document.addEventListener("input", (ev) => {
   const ed = state.admin.editing;
   if (ed && id.startsWith("ed-") && id !== "ed-draft") {
     const val = ev.target.value;
+    if (["ed-tA", "ed-tB", "ed-tC"].includes(id)) { ed.tones = { ...(ed.tones || {}), [id.slice(4)]: val }; return; }
     if (id === "ed-number") ed.number = parseInt(val, 10) || "";
     else if (id === "ed-pub") ed.pub = new Date(val);
     else if (id === "ed-close") ed.close = new Date(val);
@@ -837,6 +858,9 @@ document.addEventListener("input", (ev) => {
 });
 document.addEventListener("change", (ev) => {
   if (ev.target.id === "silent") state.silentDraft = ev.target.checked;
+  if (["ed-tA", "ed-tB", "ed-tC"].includes(ev.target.id) && state.admin.editing) {
+    state.admin.editing.tones = { ...(state.admin.editing.tones || {}), [ev.target.id.slice(4)]: ev.target.value };
+  }
   if (ev.target.id === "ed-draft" && ev.target.value) {
     const d = DRAFTS[ev.target.value];
     const ed = state.admin.editing;
