@@ -5,7 +5,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js";
 import {
   getFirestore, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where,
-  runTransaction, writeBatch, serverTimestamp, Timestamp, getCountFromServer, onSnapshot
+  runTransaction, writeBatch, serverTimestamp, Timestamp, getCountFromServer, onSnapshot, orderBy, limit
 } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js";
 import { firebaseConfig, ADMIN_EMAIL, TOTAL_SEATS, PLATE, TOTAL_STOPS } from "./config.js";
 import { DRAFTS, INTRO } from "./episodes.js";
@@ -29,7 +29,8 @@ const state = {
   nickDraft: "",
   silentDraft: false,
   busy: false,
-  admin: { tab: "bolumler", episodes: null, editing: null, waiting: null, resultFor: null, resultCounts: null }
+  admin: { tab: "bolumler", episodes: null, editing: null, waiting: null, resultFor: null, resultCounts: null },
+  chat: { room: null, msgs: [], loaded: false, draft: "", unsub: null, lastSent: 0, sending: false }
 };
 
 const $app = document.getElementById("app");
@@ -280,6 +281,7 @@ function viewLanding() {
         Google ile otobüse bin
       </button>
       <p class="note">Koltuk almak ve oy vermek için Google ile giriş gerekiyor. Herkesin tek oyu var.</p>
+      <p><a class="btn ghost" href="#kurallar">Nasıl oynanır?</a></p>
     </div>
     <h3 class="section-title">Otobüs</h3>
     ${seatCounter()}
@@ -343,20 +345,24 @@ function viewEpisode(ep) {
   const open = isOpen(ep);
   const my = state.myVotes[ep.id];
   const closes = tsDate(ep.closesAt);
+  const pub = tsDate(ep.publishAt);
+  const preview = pub && pub > now();
   let status = "";
-  if (open && !my) status = `<div class="countdown">Oylamanın bitmesine <b data-until="${closes.getTime()}">${fmtLeft(closes - now())}</b></div>`;
+  if (preview) status = `<div class="result-banner" style="background:rgba(242,177,52,.1);border-color:var(--amber-dim);color:#f3dca6">Önizleme: Bu bölümü şu an sadece sen (yönetici) görüyorsun. Yolculara <b>${fmtDate(pub)}</b> tarihinde açılacak, oylama da o zaman başlayacak.</div>`;
+  else if (open && !my) status = `<div class="countdown">Oylamanın bitmesine <b data-until="${closes.getTime()}">${fmtLeft(closes - now())}</b></div>`;
   else if (open && my) status = `<p class="note center">Oyunu <b>${esc(my)}</b> olarak verdin. Oylama kapanınca kazanan seçenek belli olacak. <span class="countdown" style="display:inline-flex;margin:0">Kalan: <b data-until="${closes.getTime()}">${fmtLeft(closes - now())}</b></span></p>`;
   else if (!ep.result) status = `<p class="note center">Oylama kapandı. Yeni durak yarın sabah 08:00'de.</p>`;
   return `
     <article class="card episode">
-      <span class="stop">${esc(ep.stop || ep.number + ". DURAK")}</span>
+      ${preview ? status : ""}
+      <span class="stop" ${preview ? 'style="margin-top:14px"' : ""}>${esc(ep.stop || ep.number + ". DURAK")}</span>
       <h2>${esc(ep.title)}</h2>
       ${ep.number === 1 && ep.intro ? `<blockquote class="intro">${esc(ep.intro)}</blockquote>` : ""}
       ${resultLineForPrev(ep)}
       <div class="story">${paras(ep.body)}</div>
       <h3 class="section-title">Rıza ne yapsın?</h3>
       ${choiceButtons(ep, { interactive: true })}
-      ${status}
+      ${preview ? "" : status}
       ${resultLine(ep)}
     </article>`;
 }
@@ -391,6 +397,7 @@ function viewMain() {
         <h2>Otobüs henüz yola çıkmadı</h2>
         <p class="muted">İlk durak yakında açılacak. Koltuğun hazır, ${esc(p.nickname)}.</p>
       </div>`}
+    ${viewChat()}
     ${past.length ? `<h3 class="section-title">Geçilen duraklar</h3>` + past.map((ep) => `
       <details class="past">
         <summary><span><b>${esc(ep.stop)}</b> · ${esc(ep.title)}</span><span class="muted">${state.myVotes[ep.id] ? "Oyun: " + esc(state.myVotes[ep.id]) : ""}</span></summary>
@@ -403,7 +410,144 @@ function viewMain() {
       <label class="check"><input type="checkbox" data-action="silent" ${p.silent ? "checked" : ""}>
         <span>Sessiz yolcuyum <span class="muted">(hikayede rol almam)</span></span></label>
     </div>
-    ${isAdmin() ? `<p class="center"><a class="btn ghost" href="#yonetim">Yönetim paneli →</a></p>` : ""}`;
+    <p class="center"><a class="btn ghost" href="#kurallar">Nasıl oynanır?</a> ${isAdmin() ? `<a class="btn ghost" href="#yonetim">Yönetim paneli →</a>` : ""}</p>`;
+}
+
+
+/* ------------------------------------------------------------------ chat */
+// Küfür filtresi: sitede ilk kontrol. Aynı kökler firestore.rules içinde de reddediliyor.
+const BAD_STEMS = ["orospu", "siktir", "sikeyim", "sikerim", "sikim", "sikik", "sikis", "sikiş", "yarrak", "yarak", "amına", "aminako",
+  "pezeven", "kahpe", "şerefsiz", "serefsiz", "yavşak", "yavsak", "gavat", "ibne", "götveren", "gotveren", "götlek", "piçlik",
+  "kaltak", "sürtük", "surtuk", "puşt", "pust", "dalyarak", "amcık", "amcik", "ananı", "anani", "avradını", "avradini", "gerizekal", "salak", "aptal", "embesil"];
+const BAD_EXACT = ["amk", "aq", "amq", "mk", "oç", "oc", "sik", "göt", "got", "piç", "pic", "sg", "skm", "sktr", "aw", "amq"];
+function normalize(t) {
+  return String(t).toLocaleLowerCase("tr-TR")
+    .replace(/[0]/g, "o").replace(/[1!|]/g, "i").replace(/3/g, "e").replace(/4|@/g, "a").replace(/\$|5/g, "s").replace(/7/g, "t")
+    .replace(/(.)\1{2,}/g, "$1$1");
+}
+function isRude(text) {
+  const n = normalize(text);
+  // harfleri araya boşluk koyarak yazmaya karşı ("o r o s p u"); sadece uzun köklerde, yanlış alarm olmasın diye
+  const squashed = n.replace(/[^a-zçğıöşü]/g, "");
+  if (BAD_STEMS.filter((b) => b.length >= 6).some((b) => squashed.includes(b))) return true;
+  const tokens = n.split(/[^a-zçğıöşü]+/).filter(Boolean);
+  return tokens.some((tk) => BAD_EXACT.includes(tk) || BAD_STEMS.some((b) => tk.startsWith(b)));
+}
+const CHAT_COOLDOWN = 15000;
+
+function chatRoom() {
+  const pub = state.episodes.filter((e) => { const p = tsDate(e.publishAt); return p && p <= now(); });
+  const cur = pub[pub.length - 1];
+  return cur ? { id: cur.id, label: `${cur.stop} sohbeti` } : { id: "peron", label: "Peron sohbeti" };
+}
+function ensureChat() {
+  if (!state.user || !state.profile) return;
+  const room = chatRoom();
+  if (state.chat.room === room.id) return;
+  if (state.chat.unsub) state.chat.unsub();
+  state.chat = { ...state.chat, room: room.id, msgs: [], loaded: false };
+  const q = query(collection(db, "chat", room.id, "messages"), orderBy("at", "desc"), limit(60));
+  state.chat.unsub = onSnapshot(q, (snap) => {
+    state.chat.msgs = snap.docs.map((d) => ({ id: d.id, ...d.data() })).reverse();
+    state.chat.loaded = true;
+    renderChatList();
+  }, (err) => { console.warn("sohbet okunamadı", err); state.chat.loaded = true; state.chat.error = true; renderChatList(); });
+}
+function fmtTime(t) { const d = tsDate(t); return d ? d.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" }) : ""; }
+function renderChatList() {
+  const box = document.getElementById("chat-list");
+  if (!box) return;
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  const me = state.user && state.user.uid;
+  if (state.chat.error) box.innerHTML = `<p class="muted center">Sohbet şu an yüklenemedi.</p>`;
+  else if (!state.chat.loaded) box.innerHTML = `<p class="muted center">Yükleniyor…</p>`;
+  else if (!state.chat.msgs.length) box.innerHTML = `<p class="muted center">Henüz kimse konuşmadı. İlk sözü sen söyle.</p>`;
+  else box.innerHTML = state.chat.msgs.map((m) => `
+    <div class="msg ${m.uid === me ? "mine" : ""}">
+      <div class="msg-head"><span class="msg-seat">${m.seat ? m.seat : "–"}</span><b>${esc(m.nickname)}</b><span class="muted">${fmtTime(m.at)}</span>
+        ${isAdmin() ? `<span class="msg-tools"><button data-action="msg-del" data-id="${esc(m.id)}">Sil</button>${m.uid !== me ? `<button data-action="msg-ban" data-uid="${esc(m.uid)}" data-nick="${esc(m.nickname)}">Sohbetten at</button>` : ""}</span>` : ""}
+      </div>
+      <div class="msg-text">${esc(m.text)}</div>
+    </div>`).join("");
+  if (atBottom || state.chat.justSent) { box.scrollTop = box.scrollHeight; state.chat.justSent = false; }
+}
+function viewChat() {
+  const room = chatRoom();
+  const banned = state.profile && state.profile.banned;
+  return `
+    <section class="card chat">
+      <div class="eyebrow">Otobüs içi sohbet</div>
+      <h3 style="margin:6px 0 4px">${esc(room.label)}</h3>
+      <p class="note" style="margin-top:0">Kararı birlikte konuşun, birbirinizi ikna edin. Küfür ve hakaret yasak. Kuralı çiğneyen yolcu sohbetten atılır.</p>
+      <div id="chat-list" class="chat-list"></div>
+      ${banned ? `<p class="error">Sohbete yazman engellendi.</p>` : `
+      <div class="chat-form">
+        <input id="chat-input" maxlength="280" placeholder="Bir şey yaz…" autocomplete="off" value="${esc(state.chat.draft)}">
+        <button class="btn small" data-action="chat-send">Gönder</button>
+      </div>
+      <p class="note" id="chat-hint" style="margin:6px 0 0"></p>`}
+    </section>`;
+}
+async function sendChat() {
+  if (state.chat.sending) return;
+  const text = (state.chat.draft || "").trim();
+  if (!text) return;
+  if (text.length > 280) return toast("Mesaj en fazla 280 karakter olabilir.");
+  if (isRude(text)) return toast("Mesajında uygunsuz bir kelime var. Saygılı bir dille tekrar dene.");
+  const wait = (state.chat.lastSent || 0) + CHAT_COOLDOWN - Date.now();
+  if (wait > 0) return toast(`Biraz yavaş 🙂 ${Math.ceil(wait / 1000)} saniye sonra tekrar yazabilirsin.`);
+  state.chat.sending = true;
+  try {
+    const b = writeBatch(db);
+    b.set(doc(collection(db, "chat", state.chat.room, "messages")), {
+      uid: state.user.uid, nickname: state.profile.nickname, seat: state.profile.seat ?? null, text, at: serverTimestamp()
+    });
+    b.update(doc(db, "users", state.user.uid), { lastMsgAt: serverTimestamp() });
+    await b.commit();
+    state.chat.draft = ""; state.chat.lastSent = Date.now(); state.chat.justSent = true;
+    const inp = document.getElementById("chat-input"); if (inp) inp.value = "";
+  } catch (e) {
+    console.warn(e);
+    toast("Mesaj gönderilemedi. Çok hızlı yazmış ya da uygunsuz bir kelime kullanmış olabilirsin.");
+  }
+  state.chat.sending = false;
+}
+
+function viewRules() {
+  const rule = (t, d) => `<div class="admin-item" style="display:block"><b>${t}</b><p class="muted" style="margin:6px 0 0">${d}</p></div>`;
+  return `
+    <div class="eyebrow">Yolcu rehberi</div>
+    <h2>Nasıl oynanır?</h2>
+    <p class="muted">Son Durak, her gün bir bölümü yayınlanan ve yönünü yolcuların oylarıyla bulan bir gizem-korku hikayesi. Şoför Rıza'nın ne yapacağına siz karar veriyorsunuz.</p>
+    <h3 class="section-title">Otobüse binmek</h3>
+    <div class="admin-list">
+      ${rule("Google ile giriş yap", "Oy vermek için Google hesabınla giriş yapman gerekiyor. Böylece herkesin tek oyu oluyor.")}
+      ${rule("Takma adını seç", "Hikayede ve otobüste gerçek adın değil, seçtiğin takma ad görünür. Kaba ya da hakaret içeren takma adlar otobüsten indirilir.")}
+      ${rule(`${TOTAL_SEATS} koltuk var`, "Boş bir koltuk seçip otur. Otobüs doluysa durakta beklersin. Bir koltuk boşalınca binebilirsin. Beklerken de bölümleri okuyup oy verebilirsin.")}
+      ${rule("Sessiz yolcu", "Her bölümde bazı yolcular hikayeye dahil olabilir: tuhaf bir ses duyar, bir not bulur, ortadan kaybolur. Rol almak istemiyorsan \"Sessiz yolcu\" seçeneğini işaretle.")}
+    </div>
+    <h3 class="section-title">Her gün bir durak</h3>
+    <div class="admin-list">
+      ${rule("Yeni bölüm her sabah 08:00'de", "Cumartesi günleri iki bölüm var: 08:00 ve 20:00.")}
+      ${rule("Bölüm sonunda seçim", "Her bölüm Rıza'nın önüne iki ya da üç seçenekle biter. Bölümdeki sayaç bitene kadar oy verebilirsin.")}
+      ${rule("Herkesin tek oyu var", "Oyun kesinleşir, sonradan değiştirilemez. İyi düşün.")}
+      ${rule("Çoğunluk kazanır", "En çok oyu alan seçenek hikayenin devamını belirler. Sonuç ertesi sabah yeni bölümle birlikte açıklanır. Beraberlikte direksiyon Rıza'da kalır ve son kararı hikayenin yaratıcısı verir.")}
+      ${rule("Geçilen duraklar", "Geç katılanlar eski bölümleri okuyabilir ama verilen kararlar değişmez. Oy yalnızca güncel durakta kullanılır.")}
+    </div>
+    <h3 class="section-title">Yolun sonu</h3>
+    <div class="admin-list">
+      ${rule(`${TOTAL_STOPS} durak, tek final`, "Hikaye 1. Durak'ta başlar, Son Durak'a varınca biter.")}
+      ${rule("Hiçbir seçim son değildir", "Kötü bir karar hikayeyi karanlığa sürükleyebilir ama sonraki duraklarda düzeltme şansı hep var. Son anda verilen tek bir karar bile her şeyi değiştirebilir. Gidişatın iyi mi kötü mü olduğu ise kimseye söylenmez.")}
+    </div>
+    <h3 class="section-title">Otobüs içi sohbet</h3>
+    <div class="admin-list">
+      ${rule("Konuşun, ikna edin", "Her durağın kendi sohbeti var. Otobüs kalkmadan önce herkes Peron'da buluşur. Hangi seçeneğin neden doğru olduğunu tartışabilir, birbirinizin fikrini değiştirebilirsiniz.")}
+      ${rule("Küfür ve hakaret yok", "Uygunsuz kelimeler içeren mesajlar gönderilmez. Kuralı çiğneyen, kaba davranan ya da kışkırtan yolcu sohbetten atılır.")}
+      ${rule("Yavaş ve kısa", "Bir mesaj en fazla 280 karakter olabilir. 15 saniyede bir mesaj yazılabilir.")}
+    </div>
+    <h3 class="section-title">Gizlilik</h3>
+    <p class="muted">Sadece takma adın, koltuk numaran ve oyların saklanır. E-posta adresin hiçbir yerde gösterilmez.</p>
+    <p class="center" style="margin-top:24px"><a href="#" class="btn">Otobüse dön</a></p>`;
 }
 
 /* ------------------------------------------------------------------ admin */
@@ -583,6 +727,7 @@ function render() {
   renderTopbar();
   let html;
   if (location.hash === "#yonetim" && isAdmin()) html = viewAdmin();
+  else if (location.hash === "#kurallar") html = viewRules();
   else if (!state.user) html = viewLanding();
   else if (!state.profileLoaded || !state.episodesLoaded) html = `<div class="loading"><span class="clock">03:17</span></div>`;
   else if (!state.profile) html = viewBoarding();
@@ -590,6 +735,8 @@ function render() {
   const focused = document.activeElement && document.activeElement.id;
   $app.innerHTML = html;
   if (focused === "nick") { const n = document.getElementById("nick"); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }
+  if (document.getElementById("chat-list")) { ensureChat(); renderChatList(); }
+  if (focused === "chat-input") { const n = document.getElementById("chat-input"); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }
 }
 
 /* ------------------------------------------------------------------ events */
@@ -606,6 +753,17 @@ document.addEventListener("click", async (ev) => {
     case "board": return boardBus();
     case "claim": return claimSeat();
     case "silent": return toggleSilent();
+    case "chat-send": return sendChat();
+    case "msg-del": {
+      if (!confirm("Bu mesaj silinsin mi?")) return;
+      try { await deleteDoc(doc(db, "chat", state.chat.room, "messages", t.dataset.id)); } catch (e) { toast("Silinemedi."); }
+      return;
+    }
+    case "msg-ban": {
+      if (!confirm(`${t.dataset.nick} sohbetten atılsın mı? Oy vermeye ve okumaya devam edebilir ama yazamaz.`)) return;
+      try { await updateDoc(doc(db, "users", t.dataset.uid), { banned: true }); toast(`${t.dataset.nick} artık sohbete yazamaz.`); } catch (e) { toast("Yapılamadı."); }
+      return;
+    }
     case "ed-new": {
       const last = state.admin.episodes[state.admin.episodes.length - 1];
       const num = last ? last.number + 1 : 1;
@@ -663,6 +821,7 @@ document.addEventListener("click", async (ev) => {
 document.addEventListener("input", (ev) => {
   const id = ev.target.id || "";
   if (id === "nick") state.nickDraft = ev.target.value;
+  if (id === "chat-input") state.chat.draft = ev.target.value;
   const ed = state.admin.editing;
   if (ed && id.startsWith("ed-") && id !== "ed-draft") {
     const val = ev.target.value;
@@ -685,6 +844,9 @@ document.addEventListener("change", (ev) => {
     if (ed.isNew && d.number !== 1) { ed.pub = nextEightAm(); ed.close = defaultClose(ed.pub); }
     render();
   }
+});
+document.addEventListener("keydown", (ev) => {
+  if (ev.target.id === "chat-input" && ev.key === "Enter") { ev.preventDefault(); sendChat(); }
 });
 window.addEventListener("hashchange", () => { state.admin.editing = null; state.admin.resultFor = null; render(); window.scrollTo(0, 0); });
 
@@ -711,6 +873,8 @@ const episodesReady = loadEpisodes();
 onAuthStateChanged(auth, async (u) => {
   state.user = u; state.profile = null; state.profileLoaded = false; state.myVotes = {}; state.counts = {};
   state.admin = { tab: "bolumler", episodes: null, editing: null, waiting: null, resultFor: null, resultCounts: null };
+  if (state.chat.unsub) state.chat.unsub();
+  state.chat = { room: null, msgs: [], loaded: false, draft: "", unsub: null, lastSent: 0, sending: false };
   render();
   if (u) {
     await Promise.all([loadProfile(), episodesReady]);
