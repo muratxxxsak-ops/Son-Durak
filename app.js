@@ -643,7 +643,7 @@ function viewRules() {
       ${rule("Yavaş ve kısa", "Bir mesaj en fazla 280 karakter olabilir. 15 saniyede bir mesaj yazılabilir.")}
     </div>
     <h3 class="section-title">Gizlilik</h3>
-    <p class="muted">Sadece takma adın, koltuk numaran ve oyların saklanır. E-posta adresin hiçbir yerde gösterilmez.</p>
+    <p class="muted">Sadece takma adın, koltuk numaran ve oyların saklanır. E-posta adresin hiçbir yerde gösterilmez. Takma adın ve koltuk numaran hikaye videolarında görünebilir; kime oy verdiğin asla gösterilmez.</p>
     <p class="center" style="margin-top:24px"><a href="#" class="btn">Otobüse dön</a></p>`;
 }
 
@@ -759,6 +759,7 @@ function viewAdmin() {
   } else {
     const list = [...state.seats.entries()].sort((x, y) => x[0] - y[0]);
     body = `
+      <div class="btn-row" style="margin-top:12px"><button class="btn small" data-action="copy-list">Yolcu listesini kopyala</button></div>
       <div class="admin-list" style="margin-top:12px">${list.length ? list.map(([n, s]) => `
         <div class="admin-item"><div><span class="counter">${n}</span> · ${esc(s.nickname)}</div>
         <button class="btn ghost small" data-action="free-seat" data-seat="${n}" data-uid="${esc(s.uid)}">Koltuğu boşalt</button></div>`).join("") : `<p class="muted">Henüz kimse binmedi.</p>`}
@@ -891,6 +892,13 @@ document.addEventListener("click", async (ev) => {
   if (t.dataset.vote) return vote(t.dataset.ep, t.dataset.vote);
   if (t.dataset.cvote) return controlVote(t.dataset.ep, t.dataset.cvote);
   const action = t.dataset.action;
+  if (action === "copy-list") {
+    const seated = [...state.seats.entries()].sort((x, y) => x[0] - y[0]).map(([n, v]) => `${n}: ${v.nickname}`);
+    const txt = `Yolcular (${state.seats.size}/${TOTAL_SEATS})\n` + seated.join("\n");
+    try { await navigator.clipboard.writeText(txt); toast("Liste kopyalandı. Claude'a yapıştırabilirsin."); }
+    catch (e) { prompt("Listeyi kopyala:", txt.replace(/\n/g, " | ")); }
+    return;
+  }
   if (!action && t.dataset.seat) { state.picked = Number(t.dataset.seat); return render(); }
   switch (action) {
     case "signin": return signIn();
