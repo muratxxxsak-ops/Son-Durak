@@ -741,14 +741,20 @@ function viewAdmin() {
     else if (a.resultFor) {
       const ep = a.episodes.find((e) => e.id === a.resultFor);
       const keys = ep.choiceKeys;
-      const c = a.resultCounts;
+      const c = a.resultCounts ? combinedCounts(a.resultCounts, a.commentVotes, keys) : null;
       const auto = c ? winnerOf(c, keys) : null;
+      const cv = a.commentVotes || {};
       body = `
         <div class="card">
           <h3>${esc(ep.stop)} · oy sonuçları</h3>
           ${!c ? `<p class="muted">Sayılıyor…</p>` : `
-            <p class="muted">Toplam oy: <b class="counter">${c.total}</b> ${isOpen(ep) ? "· oylama hâlâ açık" : ""}</p>
-            <div class="choices">${ep.choices.map((ch) => `<div class="choice has-pct ${auto === ch.key ? "winner" : ""}"><span class="bar" style="width:${pct(c, ch.key)}%"></span><span class="key">${esc(ch.key)}</span><span>${esc(ch.text)} <span class="muted">(${c[ch.key] || 0} oy)</span>${TONES[(a.resultTones || {})[ch.key]] ? `<br><small>${TONES[a.resultTones[ch.key]].icon} ${TONES[a.resultTones[ch.key]].label}</small>` : ""}</span><span class="pct">%${pct(c, ch.key)}</span></div>`).join("")}</div>
+            <p class="muted">Toplam oy: <b class="counter">${c.total}</b> ${isOpen(ep) ? "· oylama hâlâ açık" : ""} · sitede ${a.resultCounts.total}, yorumlarda ${c.total - a.resultCounts.total}</p>
+            <div class="card" style="margin:10px 0">
+              <p style="margin:0 0 8px"><b>Yorumlardan gelen oylar</b> <span class="muted">(TikTok, Instagram, YouTube)</span></p>
+              <div class="btn-row" style="align-items:center">${keys.map((k) => `<label style="display:flex;gap:6px;align-items:center"><b>${esc(k)}</b><input id="cv-${esc(k)}" type="number" min="0" inputmode="numeric" value="${cv[k] || ""}" placeholder="0" style="width:72px"></label>`).join("")}
+              <button class="btn small" data-action="apply-comments">Ekle</button></div>
+            </div>
+            <div class="choices">${ep.choices.map((ch) => `<div class="choice has-pct ${auto === ch.key ? "winner" : ""}"><span class="bar" style="width:${pct(c, ch.key)}%"></span><span class="key">${esc(ch.key)}</span><span>${esc(ch.text)} <span class="muted">(${c[ch.key] || 0} oy${cv[ch.key] ? `, ${cv[ch.key]} yorumdan` : ""})</span>${TONES[(a.resultTones || {})[ch.key]] ? `<br><small>${TONES[a.resultTones[ch.key]].icon} ${TONES[a.resultTones[ch.key]].label}</small>` : ""}</span><span class="pct">%${pct(c, ch.key)}</span></div>`).join("")}</div>
             ${auto ? `<p class="note">Kazanan: <b>${esc(auto)}</b></p>` : `<p class="note">${c.total ? "Beraberlik var. Kazananı sen seç:" : "Henüz oy yok. İstersen kazananı elle seçebilirsin:"}</p>`}
             <div class="btn-row">${keys.map((k) => `<button class="btn ${k === auto ? "" : "ghost"} small" data-action="save-result" data-key="${k}">${k} kazandı olarak kaydet</button>`).join("")}</div>
             ${ep.control && ep.control.active ? `<p class="note">🌑 Bu durakta gece kontrolü var. Sonucu kaydettiğinde en çok oyu alan gölge otomatik olarak 2 durak bagaja kilitlenir. Kim olduğu sana da gösterilmez.</p>` : ""}
@@ -878,7 +884,13 @@ async function adminSave() {
   state.busy = false; render();
 }
 
+function combinedCounts(site, cv, keys) {
+  const out = { ...site }; let total = site.total || 0;
+  for (const k of keys || []) { const n = Math.max(0, Math.floor(Number((cv || {})[k]) || 0)); out[k] = (site[k] || 0) + n; total += n; }
+  out.total = total; return out;
+}
 async function adminShowResult(id) {
+  state.admin.commentVotes = {};
   state.admin.resultFor = id; state.admin.resultCounts = null; state.admin.resultTones = {}; render();
   try { const sec = await getDoc(doc(db, "episodeSecrets", id)); if (sec.exists()) state.admin.resultTones = sec.data().tones || {}; } catch (e) { }
   const ep = state.admin.episodes.find((e) => e.id === id);
@@ -918,6 +930,12 @@ document.addEventListener("click", async (ev) => {
   if (t.dataset.vote) return vote(t.dataset.ep, t.dataset.vote);
   if (t.dataset.cvote) return controlVote(t.dataset.ep, t.dataset.cvote);
   const action = t.dataset.action;
+  if (action === "apply-comments") {
+    const ep = state.admin.episodes.find((e) => e.id === state.admin.resultFor);
+    const cv = {};
+    for (const k of (ep.choiceKeys || ep.choices.map((x) => x.key))) { const el = document.getElementById("cv-" + k); cv[k] = Math.max(0, Math.floor(Number(el && el.value) || 0)); }
+    state.admin.commentVotes = cv; toast("Yorum oyları eklendi."); return render();
+  }
   if (action === "admin-refresh") {
     try { await adminLoad(); toast("Güncellendi."); } catch (e) { toast("Yenilenemedi."); }
     return render();
@@ -974,10 +992,10 @@ document.addEventListener("click", async (ev) => {
     case "result-back": state.admin.resultFor = null; return render();
     case "save-result": {
       const ep = state.admin.episodes.find((e) => e.id === state.admin.resultFor);
-      const c = state.admin.resultCounts || { total: 0 };
+      const c = combinedCounts(state.admin.resultCounts || { total: 0 }, state.admin.commentVotes, ep.choiceKeys || ep.choices.map((x) => x.key));
       try {
         const tone = (state.admin.resultTones || {})[t.dataset.key] || null;
-        const result = { winner: t.dataset.key, counts: c, tone, savedAt: serverTimestamp() };
+        const result = { winner: t.dataset.key, counts: c, siteCounts: state.admin.resultCounts || { total: 0 }, commentVotes: state.admin.commentVotes || {}, tone, savedAt: serverTimestamp() };
         const meta = { baggage: [...(state.bus.baggage || [])], vanished: [...(state.bus.vanished || [])] };
         // 1) gece kontrolü sonucu: seçilen gölge bagaja
         if (ep.control && ep.control.active) {
