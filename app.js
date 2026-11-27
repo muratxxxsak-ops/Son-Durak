@@ -664,9 +664,23 @@ async function adminLoad() {
   const snap = await getDocs(collection(db, "episodes"));
   state.admin.episodes = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => a.number - b.number);
   try {
-    const w = await getDocs(query(collection(db, "users"), where("waiting", "==", true)));
-    state.admin.waiting = w.docs.map((d) => ({ uid: d.id, ...d.data() }));
-  } catch (e) { state.admin.waiting = []; }
+    const us = await getDocs(collection(db, "users"));
+    state.admin.users = new Map(us.docs.map((d) => [d.id, d.data()]));
+    state.admin.waiting = us.docs.filter((d) => d.data().waiting).map((d) => ({ uid: d.id, ...d.data() }));
+  } catch (e) {
+    state.admin.users = new Map();
+    try {
+      const w = await getDocs(query(collection(db, "users"), where("waiting", "==", true)));
+      state.admin.waiting = w.docs.map((d) => ({ uid: d.id, ...d.data() }));
+    } catch (e2) { state.admin.waiting = []; }
+  }
+  // who has voted in the current (latest published) episode – only yes/no, never the choice
+  const pub = state.admin.episodes.filter((e) => tsDate(e.publishAt) <= now());
+  const cur = pub[pub.length - 1];
+  state.admin.voteEp = cur || null; state.admin.voted = new Set();
+  if (cur) {
+    try { const b = await getDocs(collection(db, "votes", cur.id, "ballots")); state.admin.voted = new Set(b.docs.map((d) => d.id)); } catch (e) { }
+  }
 }
 
 function adminStatus(ep) {
@@ -758,14 +772,26 @@ function viewAdmin() {
     }
   } else {
     const list = [...state.seats.entries()].sort((x, y) => x[0] - y[0]);
+    const U = a.users || new Map(), V = a.voted || new Set(), ep = a.voteEp;
+    const silentOf = (uid) => (U.get(uid) || {}).silent;
+    const tags = (uid) => `${silentOf(uid) ? `<span class="pill">sessiz</span>` : ""}${ep ? (V.has(uid) ? `<span class="pill live">✓ oy verdi</span>` : `<span class="pill wait">✗ oy yok</span>`) : ""}`;
+    const waiting = a.waiting || [];
+    const silentN = [...U.values()].filter((u) => u.silent).length;
+    const seatedVoted = list.filter(([n, s]) => V.has(s.uid)).length;
+    const unnamed = [...U.values()].filter((u) => !u.nickname).length;
     body = `
-      <div class="btn-row" style="margin-top:12px"><button class="btn small" data-action="copy-list">Yolcu listesini kopyala</button></div>
+      <div class="card" style="margin-top:12px">
+        <p style="margin:0"><b>Koltukta ${list.length}</b> · Bekleyen ${waiting.length} · Sessiz ${silentN} · Kayıtlı toplam ${U.size}</p>
+        ${ep ? `<p class="muted" style="margin:6px 0 0">${esc(ep.stop)}: koltuktakilerden <b>${seatedVoted}/${list.length}</b> oy verdi${V.size > seatedVoted ? ` (toplam ${V.size} oy)` : ""}. Kimin neye oy verdiği gösterilmez.</p>` : `<p class="muted" style="margin:6px 0 0">Henüz yayında bölüm yok.</p>`}
+        <p class="muted" style="margin:6px 0 0">Google ile girip takma ad seçmeyenler burada görünmez: Firebase Console → Authentication → Users.</p>
+      </div>
+      <div class="btn-row" style="margin-top:12px"><button class="btn small" data-action="copy-list">Yolcu listesini kopyala</button><button class="btn ghost small" data-action="admin-refresh">Yenile</button></div>
       <div class="admin-list" style="margin-top:12px">${list.length ? list.map(([n, s]) => `
-        <div class="admin-item"><div><span class="counter">${n}</span> · ${esc(s.nickname)}</div>
+        <div class="admin-item"><div><span class="counter">${n}</span> · ${esc(s.nickname)} ${tags(s.uid)}</div>
         <button class="btn ghost small" data-action="free-seat" data-seat="${n}" data-uid="${esc(s.uid)}">Koltuğu boşalt</button></div>`).join("") : `<p class="muted">Henüz kimse binmedi.</p>`}
       </div>
-      <h3 class="section-title">Durakta bekleyenler (${(a.waiting || []).length})</h3>
-      <div class="admin-list">${(a.waiting || []).map((w) => `<div class="admin-item"><div>${esc(w.nickname)}</div><span class="pill">bekliyor</span></div>`).join("") || `<p class="muted">Bekleyen yok.</p>`}</div>
+      <h3 class="section-title">Durakta bekleyenler (${waiting.length})</h3>
+      <div class="admin-list">${waiting.map((w) => `<div class="admin-item"><div>${esc(w.nickname)} ${tags(w.uid)}</div><span class="pill">bekliyor</span></div>`).join("") || `<p class="muted">Bekleyen yok.</p>`}</div>
       <p class="note">"Koltuğu boşalt", hikayede kaybolan bir yolcunun koltuğunu açar. O kişi durakta bekleyenlere geçer.</p>`;
   }
   return `
@@ -892,6 +918,10 @@ document.addEventListener("click", async (ev) => {
   if (t.dataset.vote) return vote(t.dataset.ep, t.dataset.vote);
   if (t.dataset.cvote) return controlVote(t.dataset.ep, t.dataset.cvote);
   const action = t.dataset.action;
+  if (action === "admin-refresh") {
+    try { await adminLoad(); toast("Güncellendi."); } catch (e) { toast("Yenilenemedi."); }
+    return render();
+  }
   if (action === "copy-list") {
     const seated = [...state.seats.entries()].sort((x, y) => x[0] - y[0]).map(([n, v]) => `${n}: ${v.nickname}`);
     const txt = `Yolcular (${state.seats.size}/${TOTAL_SEATS})\n` + seated.join("\n");
