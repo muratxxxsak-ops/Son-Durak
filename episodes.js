@@ -51,9 +51,11 @@ export const DRAFTS = {
   "2C": {
     number: 2, stop: "2. DURAK", title: "Cam aralandı", intro: "",
     body: [
-      "Rıza camı biraz aralar. Dışarıdan soğuk ve nemli bir hava girer. \"Nereye gidiyorsunuz?\" diye sorar.",
-      "Cama vuran genç adam bir süre sessiz kalır. Sonra cebinden buruşuk bir otobüs bileti çıkarıp camdan içeri uzatır. Biletin üstünde tarih yazar: 14 Kasım 1987. Varış yeri: \"Son Durak\". Yolcu adı: Rıza.",
-      "Adam gülümser: \"Senin gittiğin yere.\""
+      "Rıza kapıyı açmadı. Camı yalnızca bir parmak aralığı kadar araladı. İçeri soğuk ve nemli bir hava doldu. \"Nereye gidiyorsunuz?\" diye sordu.",
+      "Cama vuran genç adam bir süre hiç konuşmadı. Arka koltuklarda yolcular nefesini tuttu. Gölge fısıldadı: \"Murat… onun ayakları yere değmiyor.\" Murat başını çevirdi: \"Sus. Bakma ona.\"",
+      "Adam cebinden buruşuk bir otobüs bileti çıkarıp camın aralığından içeri uzattı. Biletin üstünde soluk bir tarih vardı: 14 Kasım 1987. Varış yeri: \"Son Durak\". Yolcu adı: Rıza.",
+      "Adam gülümsedi: \"Senin gittiğin yere.\"",
+      "Arka sıralarda Nur, Baran ve Deli Ahmet hâlâ uyuyordu. Hiçbir şey duymadılar. Ya da öyle sandılar."
     ].join("\n\n"),
     choices: [
       { key: "A", text: "Bileti alır ve kapıyı açar." },
