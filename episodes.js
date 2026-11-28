@@ -61,5 +61,33 @@ export const DRAFTS = {
       { key: "A", text: "Bileti alır ve kapıyı açar." },
       { key: "B", text: "Bileti yırtıp camı kapatır." }
     ]
+  },
+  "3A": {
+    number: 3, stop: "3. DURAK", title: "Bilet", intro: "",
+    body: [
+      "Rıza bileti aldı. Kâğıt buz gibi olması gerekirken avucunda sıcacıktı. Kapı tıslayarak açıldı.",
+      "Genç adam binmedi. Durakta bekleyen yolcular tek tek, ses çıkarmadan bindi ve boş koltuklara oturdu. Adam dışarıdan gülümsedi: \"Ben sonraki durakta binerim.\" Kapı kendiliğinden kapandı.",
+      "Gölge fısıldadı: \"Murat… arkandaki adam nefes almıyor.\" Murat kıpırdamadı: \"Biliyorum. Ensemde soğukluğunu hissediyorum.\"",
+      "Nur uyandı: \"Otobüs neden kendi kendine gidiyor?\" Baran ayağa fırladı: \"Rıza abi, direksiyonu bırakmışsın!\" Rıza ellerine baktı. Direksiyona hiç dokunmuyordu.",
+      "Telsiz cızırdadı: \"Yolcu Rıza. 1987'de inmediğin durağa hoş geldin.\""
+    ].join("\n\n"),
+    choices: [
+      { key: "A", text: "Rıza direksiyonu zorla tutup otobüsü durdurmaya çalışır." },
+      { key: "B", text: "Rıza yolculara arka kapıdan inmelerini söyler." }
+    ]
+  },
+  "3B": {
+    number: 3, stop: "3. DURAK", title: "Yırtık bilet", intro: "",
+    body: [
+      "Rıza bileti ikiye yırtıp camı kapattı. Parçalar torpidonun üstüne düştü. Bir an sonra kendi kendilerine birleştiler.",
+      "Dışarı baktığında genç adam yoktu. Durakta kimse kalmamıştı. Camın üstünde yalnızca bir el izi vardı. İçeriden.",
+      "Otobüs yola çıktı. Farların ışığında paslı bir tabela belirdi: \"1. DURAK\". Deli Ahmet uyandı: \"Abi, biz buradan geçmedik mi?\" Baran saate baktı: \"Saat hâlâ 03:17.\"",
+      "Gölge titredi: \"Arka koltukta biri var.\" Murat döndü. Koltuk boştu, ama minderi sırılsıklamdı.",
+      "Rıza dişlerini sıktı: \"Bu yol beni bırakmıyor.\" Telsizden tek kelime geldi: \"Kaçamazsın.\""
+    ].join("\n\n"),
+    choices: [
+      { key: "A", text: "Rıza otobüsü durdurup arka koltuğa bakmaya gider." },
+      { key: "B", text: "Rıza gaza basıp yolu sonuna kadar sürer." }
+    ]
   }
 };
